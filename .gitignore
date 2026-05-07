@@ -1,0 +1,7 @@
+agentcore/.cache
+agentcore/.cli
+agentcore/cdk/node_modules
+agentcore/cdk/dist
+agentcore/cdk/cdk.out
+app/.venv
+agentcore/.env.local
