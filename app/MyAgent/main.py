@@ -1,155 +1,84 @@
-from typing import Any
-from datetime import datetime
+import json
 
-from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from model.load import load_model
-from mcp_client.client import get_streamable_http_mcp_client
 
-# ⚠️ IMPORTANTE: client de memory (SDK AgentCore)
-import boto3
+from agents import get_or_create_strands_agent, get_registration
+from config.settings import DEFAULT_AGENT_ID
+from model.load import load_model
+from runtime.memory import load_memory_context, resolve_memory_id, save_event
+from runtime.responses import (
+    normalize_agent_output,
+    response_payload,
+    response_to_assistant_text,
+)
 
 app = BedrockAgentCoreApp()
 log = app.logger
 
-# Memory config (criado via CLI)
-MEMORY_ID = "MyAgent_CustomerSupportSemantic-emALhQELQV"
-
-# AWS client (AgentCore memory events)
-data_client = boto3.client("bedrock-agentcore")
-
-# MCP CLIENT
-mcp_clients = [get_streamable_http_mcp_client()]
-
-DEFAULT_SYSTEM_PROMPT = """
-You are a helpful assistant. Use tools when appropriate.
-"""
-
-tools = []
-
-
-@tool
-def add_numbers(a: int, b: int) -> int:
-    """Return the sum of two numbers"""
-    return a + b
-
-tools.append(add_numbers)
-
-
-for mcp_client in mcp_clients:
-    if mcp_client:
-        tools.append(mcp_client)
-
-
-_agent = None
-
-
-def get_or_create_agent():
-    global _agent
-    if _agent is None:
-        _agent = Agent(
-            model=load_model(),
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            tools=tools
-        )
-    return _agent
-
-
-def save_event(role: str, text: str, actor_id: str, session_id: str):
-    """Salva evento na Memory do AgentCore"""
-    data_client.create_event(
-        memoryId=MEMORY_ID,
-        actorId=actor_id,
-        sessionId=session_id,
-        eventTimestamp=datetime.now(),
-        payload=[
-            {
-                "conversational": {
-                    "role": role,
-                    "content": {"text": text}
-                }
-            }
-        ]
-    )
-
-
-def load_memory_context(actor_id: str, session_id: str) -> str:
-    """Carrega histórico da memory"""
-
-    response = data_client.list_events(
-        memoryId=MEMORY_ID,
-        actorId=actor_id,
-        sessionId=session_id,
-        maxResults=10
-    )
-
-    print("=== RAW MEMORY RESPONSE ===")
-    print(response)
-
-    events = response.get("events", [])
-
-    print("=== EVENTS ===")
-    print(events)
-
-    context = []
-
-    for e in events:
-        print("=== EVENT ITEM ===")
-        print(e)
-
-        try:
-            text = e["conversational"]["content"]["text"]
-            role = e["conversational"]["role"]
-            context.append(f"{role}: {text}")
-        except Exception as err:
-            print("PARSE ERROR:", err)
-            continue
-
-    result = "\n".join(context)
-
-    print("=== FINAL CONTEXT ===")
-    print(result)
-
-    return result
 
 @app.entrypoint
 async def invoke(payload, context):
-    log.info("Invoking Agent with Memory.....")
+    try:
+        agent_id = payload.get("agent_id", DEFAULT_AGENT_ID)
+        log.info(f"Invoking agent_id={agent_id!r}")
 
-    agent = get_or_create_agent()
+        try:
+            registration = get_registration(agent_id)
+        except KeyError as e:
+            yield response_payload(
+                {
+                    "action": "ERROR",
+                    "message": str(e),
+                    "agent_id": agent_id,
+                }
+            )
+            return
 
-    # IDs obrigatórios
-    actor_id = payload.get("actor_id", "default-user")
-    session_id = payload.get("session_id", "default-session")
-    user_message = payload.get("prompt")
+        strands_agent = get_or_create_strands_agent(registration, load_model())
+        memory_id = resolve_memory_id(registration.memory_id)
 
-    # 1. Salva input do usuário na memória
-    save_event("USER", user_message, actor_id, session_id)
+        actor_id = payload.get("actor_id", "default-user")
+        session_id = payload.get("session_id", "default-session")
+        user_message = payload.get("prompt", "")
 
-    # 2. Carrega memória (contexto curto)
-    memory_context = load_memory_context(actor_id, session_id)
+        log.info(
+            f"actor_id={actor_id} session_id={session_id} user_message={user_message!r}"
+        )
 
-    # 3. Injeta contexto no prompt
-    final_prompt = f"""
-        You are a helpful assistant.
-        
-        Conversation history:
-        {memory_context}
-        
-        User: {user_message}
-        """
+        save_event(log, memory_id, "USER", user_message, actor_id, session_id)
 
-    # 4. Executa agente
-    stream = agent.stream_async(final_prompt)
+        memory_context = load_memory_context(
+            log, memory_id, actor_id, session_id
+        )
+        final_prompt = registration.build_user_prompt(payload, memory_context)
 
-    full_response = ""
+        response = await strands_agent.invoke_async(final_prompt)
+        log.info(f"RAW AGENT RESPONSE: {response}")
 
-    async for event in stream:
-        if "data" in event and isinstance(event["data"], str):
-            full_response += event["data"]
-            yield event["data"]
+        normalized = normalize_agent_output(response)
+        assistant_text = response_to_assistant_text(normalized)
+        log.info(f"ASSISTANT TEXT: {assistant_text}")
 
-    save_event("ASSISTANT", full_response, actor_id, session_id)
+        final_response = {
+            "action": "FINAL_RESPONSE",
+            "agent_id": agent_id,
+            "message": assistant_text,
+        }
+
+        save_event(
+            log,
+            memory_id,
+            "ASSISTANT",
+            json.dumps(final_response, ensure_ascii=False),
+            actor_id,
+            session_id,
+        )
+
+        yield response_payload(final_response)
+
+    except Exception as e:
+        log.error(f"invoke error: {str(e)}")
+        yield response_payload({"action": "ERROR", "message": str(e)})
 
 
 if __name__ == "__main__":
