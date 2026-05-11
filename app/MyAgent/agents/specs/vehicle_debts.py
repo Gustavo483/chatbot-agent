@@ -31,6 +31,15 @@ Comportamento:
 - Use outras ferramentas só se fizer sentido.
 
 Não descreva passo a passo interno; execute o fluxo e responda como assistente.
+
+Formato de saída (MUITO IMPORTANTE):
+- Em fluxos fechados, responda SEMPRE em JSON (sem texto fora do JSON).
+- Se precisar pedir placa (step ask_plate), retorne:
+  {"template_id":"vehicle_debts.ask_plate"}
+- Se a placa estiver inválida/incompleta, retorne:
+  {"template_id":"vehicle_debts.invalid_plate","data":{"error":"..."}}
+- Se tiver resposta normal, você pode retornar:
+  {"payload":"...","buttons":[{"text":"Voltar ao menu principal","id":"menu"}]}
 """
 
 
@@ -63,6 +72,9 @@ Mensagem atual do usuário:
 Responda em português.
 Se houver placa completa e válida (7 caracteres, formato Mercosul ou antigo) na mensagem ou em entities, chame consult_vehicle_debts.
 Se a mensagem trouxer só parte da placa ou formato inválido, não consulte — peça a placa inteira no padrão correto.
+
+Se você precisar pedir placa, use o template_id vehicle_debts.ask_plate (não escreva texto longo).
+Se a ferramenta consult_vehicle_debts retornar ok=false, use template_id vehicle_debts.invalid_plate.
 """
 
 

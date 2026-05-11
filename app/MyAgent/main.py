@@ -10,6 +10,7 @@ from runtime.responses import (
     normalize_agent_output,
     response_payload,
     response_to_assistant_text,
+    normalize_to_whatsapp_message,
 )
 
 app = BedrockAgentCoreApp()
@@ -59,10 +60,12 @@ async def invoke(payload, context):
         assistant_text = response_to_assistant_text(normalized)
         log.info(f"ASSISTANT TEXT: {assistant_text}")
 
+        message = normalize_to_whatsapp_message(assistant_text)
+
         final_response = {
             "action": "FINAL_RESPONSE",
             "agent_id": agent_id,
-            "message": assistant_text,
+            "message": message,
         }
 
         save_event(
